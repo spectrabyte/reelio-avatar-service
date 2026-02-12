@@ -1,30 +1,41 @@
 # Create a new release for Reel.io Avatar Service
-
 name: Create Reelio Avatar Service
+
 on:
   push:
-    branches:
-    - main
+    branches: [ main ]
+
+permissions:
+  contents: write   # REQUIRED to push tags
+  id-token: none
 
 jobs:
   build:
-    runs-on: ubuntu-latest    
+    runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # REQUIRED for tags / git describe
 
-      - uses: actions-ecosystem/action-get-latest-tag@v1
+      - name: Get latest tag
         id: get-latest-tag
+        uses: actions-ecosystem/action-get-latest-tag@v1
 
-      - uses: actions-ecosystem/action-bump-semver@v1
+      - name: Bump semver (minor)
         id: bump-semver
+        uses: actions-ecosystem/action-bump-semver@v1
         with:
           current_version: ${{ steps.get-latest-tag.outputs.tag }}
           level: minor
 
-      - uses: actions-ecosystem/action-push-tag@v1
+      - name: Push new tag
+        uses: actions-ecosystem/action-push-tag@v1
         with:
           tag: ${{ steps.bump-semver.outputs.new_version }}
-          message: '${{ steps.bump-semver.outputs.new_version }}: PR #${{ github.event.pull_request.number }} ${{ github.event.pull_request.title }}'
+          # push event doesn't have pull_request fields
+          message: "reelio-avatar-service release ${{ steps.bump-semver.outputs.new_version }}"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -37,27 +48,35 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Get the version
-        id: get_version
-        run: echo ::set-output name=VERSION::$(git describe --exact-match $GITHUB_SHA)
+      # Prefer the tag we just pushed; fallback to sha if needed
+      - name: Compute image tag
+        id: meta
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.bump-semver.outputs.new_version }}"
+          if [ -z "$VERSION" ]; then
+            VERSION="sha-$(git rev-parse --short HEAD)"
+          fi
+          echo "IMAGE_TAG=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build, tag, and push image to Amazon ECR
         id: build-image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: avatars-alt
-          IMAGE_TAG: ${{ steps.get_version.outputs.VERSION }}
-
+          IMAGE_TAG: ${{ steps.meta.outputs.IMAGE_TAG }}
         run: |
-          docker build . \
-            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          docker build . -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Download task definition
         run: |
-          aws ecs describe-task-definition --task-definition avatars-alt --query taskDefinition > task-definition.json
-          
+          aws ecs describe-task-definition \
+            --task-definition avatars-alt \
+            --query taskDefinition > task-definition.json
+
       - name: Populate the new image ID in the Amazon ECS task definition
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
